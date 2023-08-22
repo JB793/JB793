@@ -1,0 +1,88 @@
+# This Query creates a view to map porto-costs to its refering document type. The document type is determined by the "type" column.
+# Type --> Formular --> Porto-Costs
+# Average costs per day per fornmular are calculated with the help of CTA's
+
+
+
+create or replace view View_Name(
+	ANZAHL,
+	TYPE,
+	ERSTELLDATUM,
+	VERSANDART,
+    FORMULAR_NAME,
+    SCHREIBEN_BEZEICHNUNG,
+    DSP_Bezeichnung,
+    Kostenstelle,
+    Bereich,
+    Avg_Costs_per_Day,
+    Total_Porto_Costs,
+    Cluster
+) as
+
+With Cost_per_Formular AS (
+Select PAL,Sendungen,FORMULAR, concat(D.Postgesellschaft,D.Briefformat,D.Brieftarif)as kombiniert,
+Sendungen *EUR as Cost_Porto
+From Vertrieb_Daten as D
+Left join (Select 
+EUR,kombiniert,"Gültig ab","Gültig bis"
+From T_PORTO)as P
+on concat(D.Postgesellschaft,D.Briefformat,D.Brieftarif) =P.kombiniert
+and D.PAL >=P."Gültig ab"
+and D.PAL <=P."Gültig bis"
+Where PAL> '2022-01-01'
+),
+Avg_Cost as(
+Select Formular,PAL,Round(Avg(Cost_Porto/Sendungen),2) as Avg_Costs_per_Day
+From Cost_per_Formular
+Group by PAL, Formular
+),
+Date_Formular_Map as(
+Select Distinct m.Erstelldatum,f.Formular_Name
+FROM View1 as m
+Left Join T_Formulare_Fachbereich_Mapping as f
+on m.Type = f.Correspondence_Type_C
+),
+Avg_Cost_not_filled as(
+Select Distinct Erstelldatum,Legacy_Formular_Name,Avg_Costs_per_Day
+FROM Date_Formular_Map as m
+Left join Avg_Cost as a
+ON m.Erstelldatum = a.PAL and a.Formular=m.Formular_Name
+Order by m.ERSTELLDATUM,Formular_Name
+),
+Avg_Cost_filled as(
+Select Erstelldatum,
+Formular_Name,
+COALESCE(Avg_Costs_per_Day,Avg(Avg_Costs_per_Day) Over (Partition by Formular_Name,EXTRACT(Year from Erstelldatum))) as Avg_Costs_per_Day
+From Avg_Cost_not_filled
+)
+
+Select m.Anzahl,m.Type,m.Erstelldatum,m.Versandart,f.Formular_Name,f.Schreiben_Bezeichnung,f.DSP_Bezeichnung,
+Case 
+when f.Kostenstelle is null and o.Art='individ' then 'PK'
+Else f.Kostenstelle
+End as Kostenstelle,
+f.Bereich,
+Case 
+when Avg_Costs_per_Day is null then (Select avg(Avg_Costs_per_Day) from Avg_Cost_filled)
+Else Avg_Costs_per_day
+End as Avg_Costs_per_Day,
+Case
+When Avg_Costs_per_Day is null then (ANZAHL_MULTIPLE_SEND-1)*(Select avg(Avg_Costs_per_Day) from Avg_Cost_filled)
+Else(ANZAHL_MULTIPLE_SEND-1)*Avg_Costs_per_Day
+End as Total_Porto_Costs,
+Case 
+When ANZAHL_MULTIPLE_SEND=2 then '2'
+When ANZAHL_MULTIPLE_SEND=3 then '3'
+When ANZAHL_MULTIPLE_SEND=4 then '4'
+When ANZAHL_MULTIPLE_SEND=5 then '5'
+When ANZAHL_MULTIPLE_SEND>5 then '>5'
+Else 'Other'
+End as Cluster
+FROM view1 as m
+Left Join T_Formulare_Fachbereich_Mapping as f
+on m.Type = f.Correspondence_Type_C
+Left join Avg_Cost_filled as a
+on f.FORMULAR_NAME= a.Formular_Name and m.ERSTELLDATUM= a.Erstelldatum
+Left join T_OUTPUT_TEMPLATE_OVERVIEW as o
+ON m.Type = o.sf_cor_type
+Where o.ART != 'not_om';
